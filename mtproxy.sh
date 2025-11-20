@@ -181,9 +181,14 @@ read_config() {
         
         # 安全读取配置文件，只读取有效的变量定义行，移除颜色代码和非变量行
         grep -v '^#' "$CONFIG_FILE" | \
-        sed -E 's/\x1B\[[0-9;]*[mK]//g' | \
-        grep -E '^[A-Za-z0-9_]+=' | \
-        grep -v '\[.*\]' > "$CONFIG_FILE.tmp"
+        # 移除所有ANSI颜色代码和转义序列
+        sed -E 's/\x1B\[([0-9]{1,3};?)+[mK]//g' | \
+        # 移除所有控制字符
+        tr -d '\000-\037\177-\377' | \
+        # 只保留有效的变量定义行
+        grep -E '^[A-Za-z0-9_]+=[^\[]*$' | \
+        # 额外过滤掉包含日志格式的行
+        grep -v '\[[0-9]{4}-[0-9]{2}-[0-9]{2}' > "$CONFIG_FILE.tmp"
         
         if [ -s "$CONFIG_FILE.tmp" ]; then
             # 先检查临时文件是否包含有效的配置
@@ -780,26 +785,38 @@ show_proxy_info() {
     fi
     
     # 确保SECRET变量不为空
-    if [ -z "$SECRET" ]; then
-        log_message "WARNING" "密钥为空，尝试从Docker容器获取"
-        # 尝试从容器日志获取密钥
+    if [ -z "$SECRET" ] || [ "$SECRET" = "" ]; then
+        log_message "WARNING" "密钥为空或未设置，尝试从Docker容器获取"
+        
+        # 尝试从容器日志获取密钥（更宽松的正则表达式）
         if docker ps | grep -q "$CONTAINER_NAME"; then
-            CONTAINER_SECRET=$(docker logs "$CONTAINER_NAME" 2>&1 | grep -o 'secret=[a-f0-9]\{32\}' | head -n 1 | cut -d'=' -f2)
-            if [ -n "$CONTAINER_SECRET" ]; then
+            log_message "INFO" "尝试从容器日志提取密钥"
+            # 尝试多种可能的密钥格式
+            CONTAINER_SECRET=$(docker logs "$CONTAINER_NAME" 2>&1 | grep -o -E 'secret=[a-zA-Z0-9]{32}' | head -n 1 | cut -d'=' -f2)
+            
+            # 如果没找到，尝试另一种格式
+            if [ -z "$CONTAINER_SECRET" ]; then
+                log_message "INFO" "尝试另一种密钥格式"
+                CONTAINER_SECRET=$(docker logs "$CONTAINER_NAME" 2>&1 | grep -o -E '[a-zA-Z0-9]{32}' | head -n 1)
+            fi
+            
+            if [ -n "$CONTAINER_SECRET" ] && [ ${#CONTAINER_SECRET} -eq 32 ]; then
                 SECRET="$CONTAINER_SECRET"
-                log_message "SUCCESS" "从容器日志获取到密钥"
+                log_message "SUCCESS" "从容器日志获取到密钥: $SECRET"
             else
-                log_message "ERROR" "无法从容器获取密钥"
+                log_message "ERROR" "无法从容器获取有效的密钥"
                 # 生成一个临时密钥用于显示
                 SECRET=$(generate_secret)
-                log_message "INFO" "使用临时生成的密钥"
+                log_message "INFO" "生成新的临时密钥: $SECRET"
             fi
         else
             log_message "ERROR" "容器未运行，无法获取密钥"
             # 生成一个临时密钥用于显示
             SECRET=$(generate_secret)
-            log_message "INFO" "使用临时生成的密钥"
+            log_message "INFO" "生成新的临时密钥: $SECRET"
         fi
+    else
+        log_message "INFO" "从配置文件读取到密钥: $SECRET"
     fi
     
     log_message "INFO" "正在获取MTProto代理信息..."
@@ -833,7 +850,12 @@ show_proxy_info() {
         echo -e "${GREEN}额外端口: ${NC}${EXTRA_PORTS}"
     fi
     
-    echo -e "${GREEN}密钥: ${NC}${SECRET}"
+    # 确保显示的密钥不为空
+    DISPLAY_SECRET="$SECRET"
+    if [ -z "$DISPLAY_SECRET" ] || [ "$DISPLAY_SECRET" = "" ]; then
+        DISPLAY_SECRET="(空密钥)"
+    fi
+    echo -e "${GREEN}密钥: ${NC}${DISPLAY_SECRET}"
     
     # 显示高级配置选项
     if [ -n "$TAG" ]; then
@@ -851,11 +873,15 @@ show_proxy_info() {
     echo -e "${GREEN}容器名称: ${NC}${CONTAINER_NAME}"
     
     # 确保密钥不为空再构建链接
-    if [ -z "$SECRET" ]; then
+    if [ -z "$SECRET" ] || [ "$SECRET" = "" ]; then
         log_message "ERROR" "密钥为空，无法构建有效的代理链接"
         MTProto_LINK="tg://proxy?server=$PUBLIC_IP&port=$PORT&secret=密钥缺失"
         TELEGRAM_PROXY_LINK="https://t.me/proxy?server=$PUBLIC_IP&port=$PORT&secret=密钥缺失"
     else
+        # 确保密钥格式正确
+        if [ ${#SECRET} -ne 32 ]; then
+            log_message "WARNING" "密钥长度不是32字符，可能无效"
+        fi
         # 构建MTProto链接
         MTProto_LINK="tg://proxy?server=$PUBLIC_IP&port=$PORT&secret=$SECRET"
         # 构建Telegram代理链接
