@@ -142,11 +142,13 @@ generate_secret() {
     # 尝试使用openssl生成随机密钥
     if command -v openssl &> /dev/null; then
         local secret=$(openssl rand -hex 16)
-        log_message "INFO" "使用openssl生成随机密钥"
+        # 将日志输出重定向到stderr，避免混入密钥值
+        log_message "INFO" "使用openssl生成随机密钥" >&2
         echo "$secret"
     else
         # 备选方案：使用/dev/urandom生成随机密钥
-        log_message "WARNING" "未找到openssl，使用/dev/urandom生成随机密钥"
+        # 将日志输出重定向到stderr，避免混入密钥值
+        log_message "WARNING" "未找到openssl，使用/dev/urandom生成随机密钥" >&2
         local secret=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1)
         echo "$secret"
     fi
