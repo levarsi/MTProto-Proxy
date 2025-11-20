@@ -1,0 +1,5 @@
+# MTProto代理配置文件
+PORT=443
+SECRET=1234567890abcdef1234567890abcdef
+CONTAINER_NAME=mtproto-proxy
+DOCKER_IMAGE=telegrammessenger/proxy:latest
