@@ -185,31 +185,41 @@ read_config() {
         sed -E 's/\x1B\[([0-9]{1,3};?)+[mK]//g' | \
         # 移除所有控制字符
         tr -d '\000-\037\177-\377' | \
-        # 只保留有效的变量定义行
-        grep -E '^[A-Za-z0-9_]+=[^\[]*$' | \
+        # 只保留有效的变量定义行，不再限制'['字符
+        grep -E '^[A-Za-z0-9_]+=.*$' | \
         # 额外过滤掉包含日志格式的行
         grep -v '\[[0-9]{4}-[0-9]{2}-[0-9]{2}' > "$CONFIG_FILE.tmp"
         
         if [ -s "$CONFIG_FILE.tmp" ]; then
-            # 先检查临时文件是否包含有效的配置
-            if grep -qE '^PORT=[0-9]+' "$CONFIG_FILE.tmp" && grep -qE '^SECRET=[a-f0-9]{32}' "$CONFIG_FILE.tmp"; then
+            # 先检查临时文件是否包含必要的配置项（不严格验证格式）
+            if grep -q '^PORT=' "$CONFIG_FILE.tmp" && grep -q '^SECRET=' "$CONFIG_FILE.tmp"; then
                 source "$CONFIG_FILE.tmp"
                 rm -f "$CONFIG_FILE.tmp"
             else
-                log_message "ERROR" "临时配置文件缺少有效配置项"
+                log_message "ERROR" "临时配置文件缺少必要的PORT或SECRET配置项"
                 rm -f "$CONFIG_FILE.tmp"
                 return 1
             fi
         else
-            log_message "ERROR" "配置文件格式不正确"
+            log_message "ERROR" "处理后的配置文件为空或格式不正确"
             rm -f "$CONFIG_FILE.tmp"
             return 1
         fi
         
         # 验证必要的配置项
         if [ -z "$PORT" ] || [ -z "$SECRET" ]; then
-            log_message "ERROR" "配置文件缺少必要的配置项"
+            log_message "ERROR" "配置文件缺少必要的PORT或SECRET配置项"
             return 1
+        fi
+        
+        # 验证PORT是数字
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+            log_message "WARNING" "PORT配置不是有效的数字，可能导致代理无法正常工作"
+        fi
+        
+        # 验证SECRET是有效的32字符十六进制字符串
+        if ! [[ "$SECRET" =~ ^[a-f0-9]{32}$ ]]; then
+            log_message "WARNING" "SECRET配置不是有效的32字符十六进制字符串，可能导致代理无法正常工作"
         fi
         
         # 确保关键变量已设置
