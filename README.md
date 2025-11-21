@@ -73,7 +73,7 @@ brew install --cask docker
 ### 2. 获取脚本
 
 ```bash
-git clone https://github.com/yourusername/MTProto-Proxy.git
+git clone https://github.com/levasi/MTProto-Proxy.git
 cd MTProto-Proxy
 chmod +x mtproxy.sh
 ```
@@ -397,7 +397,7 @@ sudo docker pull telegrammessenger/proxy:latest
 
 ```bash
 # 克隆仓库
-git clone https://github.com/yourusername/MTProto-Proxy.git
+git clone https://github.com/levasi/MTProto-Proxy.git
 cd MTProto-Proxy
 
 # 运行测试
@@ -429,7 +429,7 @@ bash -n mtproxy.sh
 - **文档**: 查看本 README 和 `walkthrough.md`
 - **帮助**: 运行 `./mtproxy.sh help`
 - **测试**: 运行 `bash test_mtproxy.sh` 进行诊断
-- **问题**: 在 [GitHub Issues](https://github.com/yourusername/MTProto-Proxy/issues) 提交
+- **问题**: 在 [GitHub Issues](https://github.com/levasi/MTProto-Proxy/issues) 提交
 
 ---
 
