@@ -536,13 +536,13 @@ EOF
     fi
     
     # 使用数组构建Docker命令（更安全）
+    # 端口映射：外部端口 -> 容器内部 443 端口
     local docker_args=(
         "run" "-d"
         "--name" "$CONTAINER_NAME"
         "--restart=unless-stopped"
-        "-p" "$PORT:$PORT"
+        "-p" "$PORT:443"
         "-e" "SECRET=$SECRET"
-        "-e" "PORT=$PORT"
         "-e" "USERS_TTL=$USERS_TTL"
     )
     
@@ -555,15 +555,15 @@ EOF
         docker_args+=("-e" "AD_TAG=$AD_TAG")
     fi
     
-    # 添加额外端口
+    # 添加额外端口（也映射到容器内部 443）
     if [ -n "$EXTRA_PORTS" ]; then
-        # EXTRA_PORTS 格式: "-p 8080:8080 -p 8443:8443"
-        # 需要解析并添加到数组中
+        # EXTRA_PORTS 格式: "8080 8443" (空格分隔的端口列表)
+        # 每个端口都映射到容器内部的 443
         local IFS=' '
         local extra_port_array=($EXTRA_PORTS)
-        for arg in "${extra_port_array[@]}"; do
-            if [ "$arg" != "-p" ] && [ -n "$arg" ]; then
-                docker_args+=("-p" "$arg")
+        for port in "${extra_port_array[@]}"; do
+            if [ -n "$port" ]; then
+                docker_args+=("-p" "$port:443")
             fi
         done
     fi
@@ -626,21 +626,94 @@ start_mtproxy() {
         exit 1
     fi
     
-    # 检查容器是否已经在运行
-    if check_container_running; then
-        log_message "WARNING" "MTProto代理已经在运行中"
-        docker ps | grep "$CONTAINER_NAME"
-        return 0
+    # 验证容器配置是否与配置文件一致
+    log_message "INFO" "验证容器配置..."
+    local container_secret=$(docker inspect "$CONTAINER_NAME" 2>/dev/null | grep -o '"SECRET=[^"]*"' | head -n 1 | cut -d'=' -f2 | tr -d '"')
+    
+    # 检查关键配置是否匹配
+    local need_recreate=false
+    
+    if [ -z "$container_secret" ] || [ "$container_secret" != "$SECRET" ]; then
+        log_message "WARNING" "容器密钥配置不匹配"
+        need_recreate=true
     fi
     
-    if docker start "$CONTAINER_NAME"; then
-        log_message "SUCCESS" "MTProto代理已启动!"
-        # 显示简短状态信息
-        docker ps | grep "$CONTAINER_NAME"
+    # 如果配置不匹配，重新创建容器
+    if [ "$need_recreate" = true ]; then
+        log_message "WARNING" "检测到容器配置与配置文件不一致，将重新创建容器..."
+        echo -e "${YELLOW}提示: 这将使用配置文件中的设置重新创建容器${NC}"
+        
+        # 停止并删除旧容器
+        log_message "INFO" "停止并删除旧容器..."
+        docker stop "$CONTAINER_NAME" &> /dev/null
+        docker rm "$CONTAINER_NAME" &> /dev/null
+        
+        # 使用数组构建Docker命令
+        # 端口映射：外部端口 -> 容器内部 443 端口
+        local docker_args=(
+            "run" "-d"
+            "--name" "$CONTAINER_NAME"
+            "--restart=unless-stopped"
+            "-p" "$PORT:443"
+            "-e" "SECRET=$SECRET"
+        )
+        
+        # 添加用户会话超时参数
+        if [ -n "$USERS_TTL" ]; then
+            docker_args+=("-e" "USERS_TTL=$USERS_TTL")
+        fi
+        
+        # 添加标签参数
+        if [ -n "$TAG" ]; then
+            docker_args+=("-e" "TAG=$TAG")
+        fi
+        
+        # 添加广告标签参数
+        if [ -n "$AD_TAG" ]; then
+            docker_args+=("-e" "AD_TAG=$AD_TAG")
+        fi
+        
+        # 添加额外端口（也映射到容器内部 443）
+        if [ -n "$EXTRA_PORTS" ]; then
+            local IFS=' '
+            local extra_port_array=($EXTRA_PORTS)
+            for port in "${extra_port_array[@]}"; do
+                if [ -n "$port" ]; then
+                    docker_args+=("-p" "$port:443")
+                fi
+            done
+        fi
+        
+        # 添加镜像名称
+        docker_args+=("$DOCKER_IMAGE")
+        
+        log_message "INFO" "创建新容器..."
+        if docker "${docker_args[@]}"; then
+            log_message "SUCCESS" "容器已重新创建并启动!"
+            sleep 2
+            docker ps | grep "$CONTAINER_NAME"
+        else
+            log_message "ERROR" "容器创建失败!"
+            exit 1
+        fi
     else
-        log_message "ERROR" "启动失败，请检查容器状态!"
-        docker logs "$CONTAINER_NAME" 2>&1 | tail -n 10
-        exit 1
+        # 配置匹配，正常启动
+        # 检查容器是否已经在运行
+        if check_container_running; then
+            log_message "WARNING" "MTProto代理已经在运行中"
+            docker ps | grep "$CONTAINER_NAME"
+            return 0
+        fi
+        
+        if docker start "$CONTAINER_NAME"; then
+            log_message "SUCCESS" "MTProto代理已启动!"
+            # 显示简短状态信息
+            docker ps | grep "$CONTAINER_NAME"
+        else
+            log_message "ERROR" "启动失败，请检查容器状态!"
+            docker logs "$CONTAINER_NAME" 2>&1 | tail -n 10
+            exit 1
+        fi
     fi
 }
 
@@ -1129,13 +1202,13 @@ update_mtproxy() {
     fi
     
     # 使用数组构建Docker命令（更安全）
+    # 端口映射：外部端口 -> 容器内部 443 端口
     local docker_args=(
         "run" "-d"
         "--name" "$CONTAINER_NAME"
         "--restart=unless-stopped"
-        "-p" "$PORT:$PORT"
+        "-p" "$PORT:443"
         "-e" "SECRET=$SECRET"
-        "-e" "PORT=$PORT"
     )
     
     # 添加用户会话超时参数
@@ -1156,15 +1229,20 @@ update_mtproxy() {
         docker_args+=("-e" "AD_TAG=$AD_TAG")
     fi
     
-    # 添加额外端口
+    # 询问是否添加额外端口
+    echo -e "\n${BLUE}是否需要添加额外的监听端口？${NC}"
+    echo -e "${YELLOW}说明: 所有端口都会映射到容器内部的 443 端口${NC}"
+    echo -e "${YELLOW}格式: 使用空格分隔多个端口，例如: 8080 8443${NC}"
+    read -p "额外端口 (直接回车跳过): " EXTRA_PORTS
+    
     if [ -n "$EXTRA_PORTS" ]; then
-        log_message "INFO" "添加额外端口配置: $EXTRA_PORTS"
-        # EXTRA_PORTS 格式: "-p 8080:8080 -p 8443:8443"
+        log_message "INFO" "额外端口: $EXTRA_PORTS (映射到容器内部 443)"
+        # EXTRA_PORTS 格式: "8080 8443" (空格分隔的端口列表)
         local IFS=' '
         local extra_port_array=($EXTRA_PORTS)
-        for arg in "${extra_port_array[@]}"; do
-            if [ "$arg" != "-p" ] && [ -n "$arg" ]; then
-                docker_args+=("-p" "$arg")
+        for port in "${extra_port_array[@]}"; do
+            if [ -n "$port" ]; then
+                docker_args+=("-p" "$port:443")
             fi
         done
     fi
