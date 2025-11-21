@@ -141,16 +141,43 @@ check_docker() {
 generate_secret() {
     # 尝试使用openssl生成随机密钥
     if command -v openssl &> /dev/null; then
-        local secret=$(openssl rand -hex 16)
-        # 将日志输出重定向到stderr，避免混入密钥值
-        log_message "INFO" "使用openssl生成随机密钥" >&2
-        echo "$secret"
+        # 使用子shell确保日志不会混入返回值
+        (
+            log_message "INFO" "使用openssl生成随机密钥"
+        ) >&2
+        openssl rand -hex 16
     else
         # 备选方案：使用/dev/urandom生成随机密钥
-        # 将日志输出重定向到stderr，避免混入密钥值
-        log_message "WARNING" "未找到openssl，使用/dev/urandom生成随机密钥" >&2
-        local secret=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1)
-        echo "$secret"
+        (
+            log_message "WARNING" "未找到openssl，使用/dev/urandom生成随机密钥"
+        ) >&2
+        cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1
+    fi
+}
+
+# 获取配置文件路径
+get_config_path() {
+    echo "$WORKDIR/.mtproxy_config"
+}
+
+# 检查容器是否存在
+check_container_exists() {
+    local container_name=${1:-$CONTAINER_NAME}
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${container_name}$"
+}
+
+# 检查容器是否正在运行
+check_container_running() {
+    local container_name=${1:-$CONTAINER_NAME}
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container_name}$"
+}
+
+# 确保配置文件存在
+ensure_config_exists() {
+    local config_file=$(get_config_path)
+    if [ ! -f "$config_file" ]; then
+        log_message "ERROR" "未找到配置文件，请先运行安装命令: $0 install"
+        exit 1
     fi
 }
 
@@ -163,83 +190,90 @@ read_config() {
     fi
     
     # 检查配置文件是否存在
-    if [ -f "$CONFIG_FILE" ]; then
-        # 检查文件权限 (非Windows系统)
-        if [ "$(uname)" != "MINGW" ] && [ "$(uname)" != "CYGWIN" ]; then
-            local file_perm=$(stat -c "%a" "$CONFIG_FILE" 2>/dev/null)
-            if [ -n "$file_perm" ] && [ "$file_perm" -gt "600" ]; then
-                log_message "WARNING" "配置文件权限过于宽松，请考虑设置为600权限"
-            fi
-        fi
-        
-        # 读取配置
-        log_message "INFO" "从 $CONFIG_FILE 读取配置"
-        
-        # 检查配置文件是否为空
-        if [ ! -s "$CONFIG_FILE" ]; then
-            log_message "ERROR" "配置文件为空"
-            return 1
-        fi
-        
-        # 安全读取配置文件，只读取有效的变量定义行，移除颜色代码和非变量行
-        grep -v '^#' "$CONFIG_FILE" | \
-        # 移除所有ANSI颜色代码和转义序列
-        sed -E 's/\x1B\[([0-9]{1,3};?)+[mK]//g' | \
-        # 移除所有控制字符
-        tr -d '\000-\037\177-\377' | \
-        # 只保留有效的变量定义行，不再限制'['字符
-        grep -E '^[A-Za-z0-9_]+=.*$' | \
-        # 额外过滤掉包含日志格式的行
-        grep -v '\[[0-9]{4}-[0-9]{2}-[0-9]{2}' > "$CONFIG_FILE.tmp"
-        
-        if [ -s "$CONFIG_FILE.tmp" ]; then
-            # 先检查临时文件是否包含必要的配置项（不严格验证格式）
-            if grep -q '^PORT=' "$CONFIG_FILE.tmp" && grep -q '^SECRET=' "$CONFIG_FILE.tmp"; then
-                source "$CONFIG_FILE.tmp"
-                rm -f "$CONFIG_FILE.tmp"
-            else
-                log_message "ERROR" "临时配置文件缺少必要的PORT或SECRET配置项"
-                rm -f "$CONFIG_FILE.tmp"
-                return 1
-            fi
-        else
-            log_message "ERROR" "处理后的配置文件为空或格式不正确"
-            rm -f "$CONFIG_FILE.tmp"
-            return 1
-        fi
-        
-        # 验证必要的配置项
-        if [ -z "$PORT" ] || [ -z "$SECRET" ]; then
-            log_message "ERROR" "配置文件缺少必要的PORT或SECRET配置项"
-            return 1
-        fi
-        
-        # 验证PORT是数字
-        if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-            log_message "WARNING" "PORT配置不是有效的数字，可能导致代理无法正常工作"
-        fi
-        
-        # 验证SECRET是有效的32字符十六进制字符串
-        if ! [[ "$SECRET" =~ ^[a-f0-9]{32}$ ]]; then
-            log_message "WARNING" "SECRET配置不是有效的32字符十六进制字符串，可能导致代理无法正常工作"
-        fi
-        
-        # 确保关键变量已设置
-        if [ -z "$CONTAINER_NAME" ]; then
-            CONTAINER_NAME="mtproto-proxy"
-            log_message "WARNING" "容器名称未设置，使用默认值: $CONTAINER_NAME"
-        fi
-        
-        if [ -z "$DOCKER_IMAGE" ]; then
-            DOCKER_IMAGE="telegrammessenger/proxy:latest"
-            log_message "WARNING" "Docker镜像未设置，使用默认值: $DOCKER_IMAGE"
-        fi
-        
-        return 0
-    else
+    if [ ! -f "$CONFIG_FILE" ]; then
         log_message "INFO" "配置文件 $CONFIG_FILE 不存在"
         return 1
     fi
+    
+    # 检查配置文件是否为空
+    if [ ! -s "$CONFIG_FILE" ]; then
+        log_message "ERROR" "配置文件为空"
+        return 1
+    fi
+    
+    # 检查文件权限 (非Windows系统)
+    if [ "$(uname)" != "MINGW" ] && [ "$(uname)" != "CYGWIN" ]; then
+        # macOS 使用不同的 stat 命令
+        if [ "$(uname)" = "Darwin" ]; then
+            local file_perm=$(stat -f "%Lp" "$CONFIG_FILE" 2>/dev/null)
+        else
+            local file_perm=$(stat -c "%a" "$CONFIG_FILE" 2>/dev/null)
+        fi
+        
+        if [ -n "$file_perm" ] && [ "$file_perm" -gt "600" ]; then
+            log_message "WARNING" "配置文件权限过于宽松，建议设置为600权限: chmod 600 $CONFIG_FILE"
+        fi
+    fi
+    
+    # 读取配置
+    log_message "INFO" "从 $CONFIG_FILE 读取配置"
+    
+    # 简化的配置文件读取：只读取非注释、非空行的变量定义
+    # 创建临时文件用于安全加载
+    local temp_config="$CONFIG_FILE.tmp.$$"
+    
+    # 过滤配置文件：移除注释、空行和日志行
+    grep -v '^#' "$CONFIG_FILE" 2>/dev/null | \
+    grep -v '^[[:space:]]*$' | \
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | \
+    grep -v '\[20[0-9][0-9]-' > "$temp_config" 2>/dev/null
+    
+    # 检查是否有有效配置
+    if [ ! -s "$temp_config" ]; then
+        log_message "ERROR" "配置文件中没有有效的配置项"
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    # 加载配置
+    if source "$temp_config" 2>/dev/null; then
+        rm -f "$temp_config"
+    else
+        log_message "ERROR" "配置文件格式错误，无法加载"
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    # 验证必要的配置项
+    if [ -z "$PORT" ] || [ -z "$SECRET" ]; then
+        log_message "ERROR" "配置文件缺少必要的PORT或SECRET配置项"
+        return 1
+    fi
+    
+    # 验证PORT是数字且在有效范围内
+    if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+        log_message "ERROR" "PORT配置无效: $PORT (必须是1-65535之间的数字)"
+        return 1
+    fi
+    
+    # 验证SECRET是有效的32字符十六进制字符串（小写）
+    if ! [[ "$SECRET" =~ ^[a-f0-9]{32}$ ]]; then
+        log_message "WARNING" "SECRET格式可能不正确: $SECRET (应为32位小写十六进制字符串)"
+    fi
+    
+    # 确保关键变量已设置
+    if [ -z "$CONTAINER_NAME" ]; then
+        CONTAINER_NAME="mtproto-proxy"
+        log_message "WARNING" "容器名称未设置，使用默认值: $CONTAINER_NAME"
+    fi
+    
+    if [ -z "$DOCKER_IMAGE" ]; then
+        DOCKER_IMAGE="telegrammessenger/proxy:latest"
+        log_message "WARNING" "Docker镜像未设置，使用默认值: $DOCKER_IMAGE"
+    fi
+    
+    log_message "INFO" "配置文件读取成功"
+    return 0
 }
 
 # 显示帮助信息
@@ -279,15 +313,51 @@ show_help() {
 # 检查端口是否被占用
 check_port() {
     local port=$1
-    if command -v lsof &> /dev/null; then
-        if lsof -i:"$port" &> /dev/null; then
-            return 1  # 端口被占用
-        fi
-    elif command -v netstat &> /dev/null; then
-        if netstat -tulpn | grep -q ":$port "; then
+    local os_type=$(uname)
+    
+    # 首先检查Docker容器是否已占用该端口
+    if command -v docker &> /dev/null; then
+        if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":$port->"; then
+            log_message "WARNING" "端口 $port 已被Docker容器占用"
             return 1  # 端口被占用
         fi
     fi
+    
+    # 根据操作系统使用不同的端口检查方法
+    if [ "$os_type" = "Darwin" ]; then
+        # macOS 系统
+        if command -v lsof &> /dev/null; then
+            if lsof -i:"$port" &> /dev/null; then
+                return 1  # 端口被占用
+            fi
+        fi
+    elif [ "$os_type" = "MINGW" ] || [ "$os_type" = "CYGWIN" ]; then
+        # Windows 系统（Git Bash/Cygwin）
+        if command -v netstat &> /dev/null; then
+            if netstat -ano | grep -q ":$port "; then
+                return 1  # 端口被占用
+            fi
+        fi
+    else
+        # Linux 系统
+        if command -v ss &> /dev/null; then
+            # 优先使用 ss 命令（更现代）
+            if ss -tuln | grep -q ":$port "; then
+                return 1  # 端口被占用
+            fi
+        elif command -v netstat &> /dev/null; then
+            # 备用 netstat 命令
+            if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+                return 1  # 端口被占用
+            fi
+        elif command -v lsof &> /dev/null; then
+            # 最后尝试 lsof
+            if lsof -i:"$port" &> /dev/null; then
+                return 1  # 端口被占用
+            fi
+        fi
+    fi
+    
     return 0  # 端口可用
 }
 
@@ -329,12 +399,15 @@ install_mtproxy() {
         log_message "SUCCESS" "已生成随机密钥"
     else
         while true; do
-            read -p "请输入自定义密钥 (16字节十六进制字符串): " SECRET
-            # 验证密钥格式
+            read -p "请输入自定义密钥 (32位十六进制字符串): " SECRET
+            # 验证密钥格式（允许大小写，但会转换为小写）
             if ! [[ "$SECRET" =~ ^[a-fA-F0-9]{32}$ ]]; then
-                log_message "ERROR" "密钥格式错误，请输入16字节的十六进制字符串!"
+                log_message "ERROR" "密钥格式错误，请输入32位的十六进制字符串 (0-9, a-f)"
                 continue
             fi
+            # 统一转换为小写
+            SECRET=$(echo "$SECRET" | tr '[:upper:]' '[:lower:]')
+            log_message "INFO" "密钥已统一转换为小写格式"
             break
         done
     fi
@@ -385,19 +458,24 @@ install_mtproxy() {
     fi
     
     # 显示配置摘要
-    log_message "INFO" "配置摘要："
-    log_message "INFO" "端口: $PORT"
-    log_message "INFO" "密钥: $SECRET"
+    echo -e "\n${BLUE}========================================${NC}"
+    echo -e "${BLUE}配置摘要${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${GREEN}端口:${NC} $PORT"
+    echo -e "${GREEN}密钥:${NC} $SECRET"
     if [ -n "$TAG" ]; then
-        log_message "INFO" "自定义标签: $TAG"
+        echo -e "${GREEN}自定义标签:${NC} $TAG"
     fi
     if [ -n "$AD_TAG" ]; then
-        log_message "INFO" "广告标签: $AD_TAG"
+        echo -e "${GREEN}广告标签:${NC} $AD_TAG"
     fi
-    log_message "INFO" "用户会话超时: ${USERS_TTL}秒"
+    echo -e "${GREEN}用户会话超时:${NC} ${USERS_TTL}秒"
     if [ -n "$EXTRA_PORTS" ]; then
-        log_message "INFO" "额外端口: ${EXTRA_PORTS//-p /}"
+        echo -e "${GREEN}额外端口:${NC} ${EXTRA_PORTS//-p /}"
     fi
+    echo -e "${GREEN}Docker镜像:${NC} $DOCKER_IMAGE"
+    echo -e "${GREEN}容器名称:${NC} $CONTAINER_NAME"
+    echo -e "${BLUE}========================================${NC}\n"
     
     # 用户确认
     read -p "确认以上配置并继续安装? (y/n，默认: y): " CONFIRM
@@ -430,13 +508,25 @@ EOF
     chmod 600 "$CONFIG_FILE" || log_message "WARNING" "无法设置配置文件权限为600"
     
     # 拉取镜像
-    log_message "INFO" "拉取MTProto代理镜像..."
+    log_message "INFO" "正在拉取MTProto代理镜像..."
+    echo -e "${YELLOW}提示: 首次拉取可能需要几分钟，请耐心等待...${NC}"
+    
     if ! docker pull "$DOCKER_IMAGE"; then
         log_message "ERROR" "拉取镜像失败!"
+        echo -e "${RED}可能的原因:${NC}"
+        echo -e "  1. 网络连接问题"
+        echo -e "  2. Docker Hub 访问受限"
+        echo -e "  3. Docker 服务未正常运行"
+        echo -e "${YELLOW}建议:${NC}"
+        echo -e "  - 检查网络连接"
+        echo -e "  - 尝试使用代理或镜像加速服务"
+        echo -e "  - 稍后重试"
         # 清理配置文件
         rm -f "$CONFIG_FILE"
         exit 1
     fi
+    
+    log_message "SUCCESS" "镜像拉取成功"
     
     # 停止并删除已存在的容器
     if docker ps -a | grep -q "$CONTAINER_NAME"; then
@@ -445,57 +535,72 @@ EOF
         docker rm "$CONTAINER_NAME" &> /dev/null
     fi
     
-    # 构建Docker命令
-    DOCKER_CMD="docker run -d \
-        --name \"$CONTAINER_NAME\" \
-        --restart=unless-stopped \
-        -p \"$PORT:$PORT\" \
-        -e SECRET=\"$SECRET\" \
-        -e PORT=\"$PORT\" \
-        -e USERS_TTL=\"$USERS_TTL\""
+    # 使用数组构建Docker命令（更安全）
+    local docker_args=(
+        "run" "-d"
+        "--name" "$CONTAINER_NAME"
+        "--restart=unless-stopped"
+        "-p" "$PORT:$PORT"
+        "-e" "SECRET=$SECRET"
+        "-e" "PORT=$PORT"
+        "-e" "USERS_TTL=$USERS_TTL"
+    )
     
     # 添加可选的标签配置
     if [ -n "$TAG" ]; then
-        DOCKER_CMD="$DOCKER_CMD \
-        -e TAG=\"$TAG\""
+        docker_args+=("-e" "TAG=$TAG")
     fi
     
     if [ -n "$AD_TAG" ]; then
-        DOCKER_CMD="$DOCKER_CMD \
-        -e AD_TAG=\"$AD_TAG\""
+        docker_args+=("-e" "AD_TAG=$AD_TAG")
     fi
     
     # 添加额外端口
     if [ -n "$EXTRA_PORTS" ]; then
-        # 使用eval来正确处理EXTRA_PORTS中的引号
-        eval "DOCKER_CMD=\"$DOCKER_CMD $EXTRA_PORTS\""
+        # EXTRA_PORTS 格式: "-p 8080:8080 -p 8443:8443"
+        # 需要解析并添加到数组中
+        local IFS=' '
+        local extra_port_array=($EXTRA_PORTS)
+        for arg in "${extra_port_array[@]}"; do
+            if [ "$arg" != "-p" ] && [ -n "$arg" ]; then
+                docker_args+=("-p" "$arg")
+            fi
+        done
     fi
     
     # 添加镜像名称
-    DOCKER_CMD="$DOCKER_CMD \
-        $DOCKER_IMAGE"
+    docker_args+=("$DOCKER_IMAGE")
     
     # 运行容器
-    log_message "INFO" "启动MTProto代理容器..."
-    eval "$DOCKER_CMD"
-    
-    if [ $? -eq 0 ]; then
+    log_message "INFO" "正在启动MTProto代理容器..."
+    if docker "${docker_args[@]}" > /dev/null 2>&1; then
         # 等待容器启动
-        sleep 2
+        log_message "INFO" "等待容器启动..."
+        sleep 3
         
         # 检查容器是否真的在运行
         if docker ps | grep -q "$CONTAINER_NAME"; then
             log_message "SUCCESS" "MTProto代理安装成功!"
+            echo -e "\n${GREEN}✔ 安装完成!${NC}\n"
             show_proxy_info
         else
-            log_message "ERROR" "MTProto代理容器启动失败，请检查日志"
+            log_message "ERROR" "MTProto代理容器启动失败"
+            echo -e "${RED}容器日志:${NC}"
             docker logs "$CONTAINER_NAME" 2>&1 | tail -n 20
+            echo -e "\n${YELLOW}可能的原因:${NC}"
+            echo -e "  1. 端口已被占用"
+            echo -e "  2. 配置参数错误"
+            echo -e "  3. Docker 资源不足"
             # 清理配置文件
             rm -f "$CONFIG_FILE"
             exit 1
         fi
     else
         log_message "ERROR" "MTProto代理安装失败!"
+        echo -e "${YELLOW}请检查:${NC}"
+        echo -e "  1. Docker 服务是否正常运行"
+        echo -e "  2. 端口 $PORT 是否可用"
+        echo -e "  3. 系统资源是否充足"
         # 清理配置文件
         rm -f "$CONFIG_FILE"
         exit 1
@@ -504,12 +609,8 @@ EOF
 
 # 启动MTProto代理
 start_mtproxy() {
-    CONFIG_FILE="$WORKDIR/.mtproxy_config"
-    
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_message "ERROR" "未找到配置文件，请先运行安装命令!"
-        exit 1
-    fi
+    ensure_config_exists
+    CONFIG_FILE=$(get_config_path)
     
     log_message "INFO" "启动MTProto代理..."
     
@@ -520,14 +621,15 @@ start_mtproxy() {
     fi
     
     # 检查容器是否存在
-    if ! docker ps -a | grep -q "$CONTAINER_NAME"; then
-        log_message "ERROR" "MTProto代理容器不存在，请先运行安装命令!"
+    if ! check_container_exists; then
+        log_message "ERROR" "MTProto代理容器不存在，请先运行安装命令: $0 install"
         exit 1
     fi
     
     # 检查容器是否已经在运行
-    if docker ps | grep -q "$CONTAINER_NAME"; then
+    if check_container_running; then
         log_message "WARNING" "MTProto代理已经在运行中"
+        docker ps | grep "$CONTAINER_NAME"
         return 0
     fi
     
@@ -544,12 +646,8 @@ start_mtproxy() {
 
 # 停止MTProto代理
 stop_mtproxy() {
-    CONFIG_FILE="$WORKDIR/.mtproxy_config"
-    
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_message "ERROR" "未找到配置文件，请先运行安装命令!"
-        exit 1
-    fi
+    ensure_config_exists
+    CONFIG_FILE=$(get_config_path)
     
     log_message "INFO" "停止MTProto代理..."
     
@@ -560,13 +658,13 @@ stop_mtproxy() {
     fi
     
     # 检查容器是否存在
-    if ! docker ps -a | grep -q "$CONTAINER_NAME"; then
-        log_message "ERROR" "MTProto代理容器不存在，请先运行安装命令!"
+    if ! check_container_exists; then
+        log_message "ERROR" "MTProto代理容器不存在，请先运行安装命令: $0 install"
         exit 1
     fi
     
     # 检查容器是否已经停止
-    if ! docker ps | grep -q "$CONTAINER_NAME"; then
+    if ! check_container_running; then
         log_message "WARNING" "MTProto代理已经停止"
         return 0
     fi
@@ -581,12 +679,8 @@ stop_mtproxy() {
 
 # 重启MTProto代理
 restart_mtproxy() {
-    CONFIG_FILE="$WORKDIR/.mtproxy_config"
-    
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_message "ERROR" "未找到配置文件，请先运行安装命令!"
-        exit 1
-    fi
+    ensure_config_exists
+    CONFIG_FILE=$(get_config_path)
     
     log_message "INFO" "重启MTProto代理..."
     
@@ -597,17 +691,18 @@ restart_mtproxy() {
     fi
     
     # 检查容器是否存在
-    if ! docker ps -a | grep -q "$CONTAINER_NAME"; then
-        log_message "ERROR" "MTProto代理容器不存在，请先运行安装命令!"
+    if ! check_container_exists; then
+        log_message "ERROR" "MTProto代理容器不存在，请先运行安装命令: $0 install"
         exit 1
     fi
     
-    # 停止容器
-    log_message "INFO" "停止MTProto代理容器..."
-    docker stop "$CONTAINER_NAME" &> /dev/null
-    
-    # 等待容器完全停止
-    sleep 2
+    # 停止容器（如果正在运行）
+    if check_container_running; then
+        log_message "INFO" "停止MTProto代理容器..."
+        docker stop "$CONTAINER_NAME" &> /dev/null
+        # 等待容器完全停止
+        sleep 2
+    fi
     
     # 启动容器
     log_message "INFO" "启动MTProto代理容器..."
@@ -624,12 +719,8 @@ restart_mtproxy() {
 
 # 查看MTProto代理状态
 status_mtproxy() {
-    CONFIG_FILE="$WORKDIR/.mtproxy_config"
-    
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_message "ERROR" "未找到配置文件，请先运行安装命令!"
-        exit 1
-    fi
+    ensure_config_exists
+    CONFIG_FILE=$(get_config_path)
     
     # 读取配置
     if ! read_config; then
@@ -639,7 +730,7 @@ status_mtproxy() {
     
     log_message "INFO" "查看MTProto代理状态..."
     
-    if docker ps | grep -q "$CONTAINER_NAME"; then
+    if check_container_running; then
         log_message "SUCCESS" "MTProto代理正在运行"
         docker ps | grep "$CONTAINER_NAME"
         
@@ -650,7 +741,7 @@ status_mtproxy() {
         # 显示连接数统计（如果可用）
         log_message "INFO" "最近连接统计:"
         docker logs "$CONTAINER_NAME" 2>&1 | grep -i "connections" | tail -n 5
-    elif docker ps -a | grep -q "$CONTAINER_NAME"; then
+    elif check_container_exists; then
         log_message "WARNING" "MTProto代理已停止"
         docker ps -a | grep "$CONTAINER_NAME"
     else
@@ -833,16 +924,16 @@ show_proxy_info() {
     
     log_message "INFO" "正在获取MTProto代理信息..."
     
-    # 获取公网IP的多种方式尝试
-    PUBLIC_IP=$(curl -s ipinfo.io/ip 2>/dev/null)
+    # 获取公网IP的多种方式尝试（添加超时设置）
+    PUBLIC_IP=$(curl -s --max-time 10 ipinfo.io/ip 2>/dev/null)
     if [ -z "$PUBLIC_IP" ]; then
         log_message "WARNING" "无法通过ipinfo.io获取公网IP，尝试备用方法"
-        PUBLIC_IP=$(curl -s icanhazip.com 2>/dev/null)
+        PUBLIC_IP=$(curl -s --max-time 10 icanhazip.com 2>/dev/null)
     fi
     
     if [ -z "$PUBLIC_IP" ]; then
         log_message "WARNING" "无法通过icanhazip.com获取公网IP，尝试最后一种方法"
-        PUBLIC_IP=$(curl -s api.ipify.org 2>/dev/null)
+        PUBLIC_IP=$(curl -s --max-time 10 api.ipify.org 2>/dev/null)
     fi
     
     if [ -z "$PUBLIC_IP" ]; then
@@ -1013,15 +1104,14 @@ update_mtproxy() {
         log_message "INFO" "停止并删除旧容器..."
         
         # 停止容器
-        if docker stop "$CONTAINER_NAME" > /dev/null; then
+        if docker stop "$CONTAINER_NAME" > /dev/null 2>&1; then
             log_message "SUCCESS" "容器已停止"
         else
-            log_message "ERROR" "容器停止失败"
-            exit 1
+            log_message "WARNING" "容器停止失败或已停止"
         fi
         
         # 删除容器
-        if docker rm "$CONTAINER_NAME" > /dev/null; then
+        if docker rm "$CONTAINER_NAME" > /dev/null 2>&1; then
             log_message "SUCCESS" "容器已删除"
         else
             log_message "ERROR" "容器删除失败"
@@ -1032,58 +1122,69 @@ update_mtproxy() {
     fi
     
     log_message "INFO" "拉取最新镜像..."
-    if docker pull telegrammessenger/proxy > /dev/null; then
+    if docker pull "$DOCKER_IMAGE" > /dev/null 2>&1; then
         log_message "SUCCESS" "镜像更新成功"
     else
-        log_message "ERROR" "镜像更新失败"
-        log_message "WARNING" "将继续使用本地现有镜像"
+        log_message "WARNING" "镜像更新失败，将使用本地现有镜像"
     fi
     
-    # 构建Docker运行命令
-    DOCKER_CMD="docker run -d --name $CONTAINER_NAME --restart=unless-stopped -p $PORT:$PORT"
+    # 使用数组构建Docker命令（更安全）
+    local docker_args=(
+        "run" "-d"
+        "--name" "$CONTAINER_NAME"
+        "--restart=unless-stopped"
+        "-p" "$PORT:$PORT"
+        "-e" "SECRET=$SECRET"
+        "-e" "PORT=$PORT"
+    )
+    
+    # 添加用户会话超时参数
+    if [ -n "$USERS_TTL" ]; then
+        log_message "INFO" "使用用户会话超时: $USERS_TTL 秒"
+        docker_args+=("-e" "USERS_TTL=$USERS_TTL")
+    fi
+    
+    # 添加标签参数
+    if [ -n "$TAG" ]; then
+        log_message "INFO" "使用自定义标签: $TAG"
+        docker_args+=("-e" "TAG=$TAG")
+    fi
+    
+    # 添加广告标签参数
+    if [ -n "$AD_TAG" ]; then
+        log_message "INFO" "使用广告标签: $AD_TAG"
+        docker_args+=("-e" "AD_TAG=$AD_TAG")
+    fi
     
     # 添加额外端口
     if [ -n "$EXTRA_PORTS" ]; then
         log_message "INFO" "添加额外端口配置: $EXTRA_PORTS"
-        for EXTRA_PORT in $EXTRA_PORTS; do
-            DOCKER_CMD+=" -p $EXTRA_PORT:$EXTRA_PORT"
+        # EXTRA_PORTS 格式: "-p 8080:8080 -p 8443:8443"
+        local IFS=' '
+        local extra_port_array=($EXTRA_PORTS)
+        for arg in "${extra_port_array[@]}"; do
+            if [ "$arg" != "-p" ] && [ -n "$arg" ]; then
+                docker_args+=("-p" "$arg")
+            fi
         done
     fi
     
-    # 添加标签参数
-    TAG_PARAM=""
-    if [ -n "$TAG" ]; then
-        log_message "INFO" "使用自定义标签: $TAG"
-        TAG_PARAM="-e TAG=$TAG"
-    fi
-    
-    # 添加广告标签参数
-    AD_TAG_PARAM=""
-    if [ -n "$AD_TAG" ]; then
-        log_message "INFO" "使用广告标签: $AD_TAG"
-        AD_TAG_PARAM="-e AD_TAG=$AD_TAG"
-    fi
-    
-    # 添加用户会话超时参数
-    USERS_TTL_PARAM=""
-    if [ -n "$USERS_TTL" ]; then
-        log_message "INFO" "使用用户会话超时: $USERS_TTL 秒"
-        USERS_TTL_PARAM="-e USERS_TTL=$USERS_TTL"
-    fi
-    
-    # 完成Docker命令
-    DOCKER_CMD+=" $TAG_PARAM $AD_TAG_PARAM $USERS_TTL_PARAM -e SECRET=$SECRET telegrammessenger/proxy"
+    # 添加镜像名称
+    docker_args+=("$DOCKER_IMAGE")
     
     log_message "INFO" "启动新的MTProto代理容器..."
     
     # 执行Docker命令
-    if eval "$DOCKER_CMD"; then
+    if docker "${docker_args[@]}"; then
         log_message "SUCCESS" "MTProto代理更新成功!"
+        # 等待容器启动
+        sleep 2
         # 显示代理信息
         show_proxy_info
     else
         log_message "ERROR" "MTProto代理更新失败!"
         log_message "INFO" "请检查Docker是否正常运行，以及端口是否被占用"
+        docker logs "$CONTAINER_NAME" 2>&1 | tail -n 20
         exit 1
     fi
 }
